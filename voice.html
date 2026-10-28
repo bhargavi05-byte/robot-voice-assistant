@@ -1,0 +1,337 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bujji - Mini Talking Robot</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 650px;
+      margin: 40px auto;
+      padding: 20px;
+      text-align: center;
+      background: #eef7f2;
+    }
+
+    button, select {
+      padding: 12px;
+      margin: 8px;
+      font-size: 16px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    #status, #question, #answer {
+      background: white;
+      padding: 15px;
+      border-radius: 10px;
+      overflow-wrap: anywhere;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>🤖 Meet Bujji!</h1>
+  <p>Talk to Bujji in English, Telugu, or Hindi.</p>
+
+  <label for="language">Choose language:</label>
+  <select id="language">
+    <option value="English">English</option>
+    <option value="Telugu">Telugu</option>
+    <option value="Hindi">Hindi</option>
+  </select>
+
+  <br>
+  <button id="listenBtn">🎤 Ask Bujji</button>
+  <button id="replayBtn" disabled>🔊 Speak Again</button>
+  <button id="stopBtn">🔇 Stop Speaking</button>
+
+  <h3>Status</h3>
+  <p id="status">Ready to listen</p>
+
+  <h3>Your question</h3>
+  <p id="question">Nothing yet</p>
+
+  <h3>Bujji's answer</h3>
+  <p id="answer">Hi! I'm Bujji. Ask me something!</p>
+
+  <script>
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    const statusBox = document.getElementById("status");
+    const questionBox = document.getElementById("question");
+    const answerBox = document.getElementById("answer");
+    const listenBtn = document.getElementById("listenBtn");
+    const replayBtn = document.getElementById("replayBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const languageSelect = document.getElementById("language");
+
+    const languageCodes = {
+      English: "en-IN",
+      Telugu: "te-IN",
+      Hindi: "hi-IN"
+    };
+
+    let recognition = null;
+    let currentAudio = null;
+    let lastAudioUrl = null;
+    let lastAnswer = "";
+    let lastAnswerLanguage = "English";
+    let requestNumber = 0;
+
+    // Read JSON safely and show useful errors if the server returns HTML.
+    async function readJsonResponse(response) {
+      const contentType = response.headers.get("content-type") || "";
+
+      if (!contentType.toLowerCase().includes("application/json")) {
+        const details = await response.text();
+
+        console.error(
+          "Expected JSON but received:",
+          contentType,
+          details.slice(0, 300)
+        );
+
+        throw new Error(
+          "The server returned a webpage instead of JSON. " +
+          "Check that Bujji's server is running at " +
+          "http://localhost:3000 and that the API route is correct."
+        );
+      }
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "The request failed.");
+      }
+
+      return data;
+    }
+
+    function stopAudioOnly() {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
+        currentAudio = null;
+      }
+    }
+
+    function stopBujji() {
+      requestNumber++;
+
+      if (recognition) {
+        try {
+          recognition.abort();
+        } catch (_) {}
+        recognition = null;
+      }
+
+      stopAudioOnly();
+      statusBox.textContent = "Bujji stopped.";
+    }
+
+    async function playSavedAudio(audioUrl, myRequest) {
+      if (!audioUrl || myRequest !== requestNumber) return;
+
+      stopAudioOnly();
+
+      const audio = new Audio(audioUrl);
+      currentAudio = audio;
+
+      audio.onended = () => {
+        if (myRequest === requestNumber && currentAudio === audio) {
+          currentAudio = null;
+          statusBox.textContent = "Ready for another question";
+        }
+      };
+
+      audio.onerror = () => {
+        if (myRequest === requestNumber && currentAudio === audio) {
+          currentAudio = null;
+          statusBox.textContent =
+            "Audio could not be played. Please try asking again.";
+        }
+      };
+
+      statusBox.textContent = "Bujji is speaking...";
+
+      try {
+        await audio.play();
+      } catch (error) {
+        if (myRequest === requestNumber) {
+          currentAudio = null;
+          statusBox.textContent =
+            "Could not play audio. Try clicking Speak Again.";
+          console.error("Audio playback error:", error);
+        }
+      }
+    }
+
+    async function speakBujji(text, language, myRequest) {
+      if (myRequest !== requestNumber) return;
+
+      statusBox.textContent = "Bujji is preparing its voice...";
+
+      try {
+        const response = await fetch("/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, language })
+        });
+
+        const data = await readJsonResponse(response);
+
+        if (myRequest !== requestNumber) return;
+
+        if (!data.audio || typeof data.audio !== "string") {
+          throw new Error(
+            "The speech service returned no audio. Check the VS Code terminal."
+          );
+        }
+
+        const mimeType = data.mimeType || "audio/wav";
+        lastAudioUrl = `data:${mimeType};base64,${data.audio}`;
+        replayBtn.disabled = false;
+
+        await playSavedAudio(lastAudioUrl, myRequest);
+      } catch (error) {
+        if (myRequest === requestNumber) {
+          statusBox.textContent = error.message;
+          console.error("BUJJI SPEECH ERROR:", error);
+        }
+      }
+    }
+
+    // Ask Bujji using the microphone.
+    listenBtn.onclick = () => {
+      if (!SpeechRecognition) {
+        statusBox.textContent =
+          "Speech recognition is not supported. Please use Chrome.";
+        return;
+      }
+
+      stopBujji();
+      const myRequest = requestNumber;
+      const language = languageSelect.value;
+
+      recognition = new SpeechRecognition();
+      recognition.lang = languageCodes[language];
+      recognition.continuous = false;
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        if (myRequest === requestNumber) {
+          statusBox.textContent = "Bujji is listening... Speak now!";
+        }
+      };
+
+      recognition.onresult = async (event) => {
+        if (myRequest !== requestNumber) return;
+
+        const question = event.results[0][0].transcript.trim();
+        questionBox.textContent = question;
+
+        if (!question) {
+          statusBox.textContent = "I couldn't hear you. Please try again.";
+          return;
+        }
+
+        statusBox.textContent = "Bujji is thinking...";
+
+        try {
+          const response = await fetch("/ask", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question, language })
+          });
+
+          const data = await readJsonResponse(response);
+
+          if (myRequest !== requestNumber) return;
+
+          if (typeof data.answer !== "string" || !data.answer.trim()) {
+            throw new Error("Bujji returned an empty answer.");
+          }
+
+          lastAnswer = data.answer;
+          lastAnswerLanguage = language;
+          lastAudioUrl = null;
+          replayBtn.disabled = true;
+
+          answerBox.textContent = lastAnswer;
+
+          await speakBujji(
+            lastAnswer,
+            lastAnswerLanguage,
+            myRequest
+          );
+        } catch (error) {
+          if (myRequest === requestNumber) {
+            statusBox.textContent = error.message;
+            console.error("BUJJI ANSWER ERROR:", error);
+          }
+        }
+      };
+
+      recognition.onerror = (event) => {
+        if (myRequest !== requestNumber) return;
+
+        statusBox.textContent =
+          event.error === "not-allowed"
+            ? "Please allow microphone access in Chrome."
+            : "Microphone error: " + event.error;
+      };
+
+      recognition.onend = () => {
+        if (myRequest === requestNumber) {
+          recognition = null;
+        }
+      };
+
+      try {
+        recognition.start();
+      } catch (error) {
+        statusBox.textContent =
+          "Could not start the microphone. Please try again.";
+      }
+    };
+
+    // Replay the last generated audio without asking the AI again.
+    replayBtn.onclick = async () => {
+      if (!lastAudioUrl) {
+        if (lastAnswer) {
+          statusBox.textContent =
+            "Preparing Bujji's voice for the last answer...";
+          const myRequest = requestNumber;
+          await speakBujji(
+            lastAnswer,
+            lastAnswerLanguage,
+            myRequest
+          );
+        } else {
+          statusBox.textContent = "Ask Bujji a question first.";
+        }
+        return;
+      }
+
+      await playSavedAudio(lastAudioUrl, requestNumber);
+    };
+
+    // Stop playback without deleting the saved answer.
+    stopBtn.onclick = () => {
+      stopBujji();
+    };
+  </script>
+</body>
+</html>
